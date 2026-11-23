@@ -92,6 +92,36 @@ location / {
 
 Browser recording needs HTTPS (or `localhost`), so it works once the app is behind your TLS proxy.
 
+### Network access & login cookies
+
+The web container is published as `APP_BIND:APP_PORT → 8000`, and `COOKIE_SECURE` must match how people open the app. Set these in `.env` and run `docker compose up -d` after changing them.
+
+| How users reach the app | `APP_BIND` | `COOKIE_SECURE` |
+|---|---|---|
+| `https://…` via a reverse proxy **on the same host** (not in Docker) | `127.0.0.1` *(default)* | `true` *(default)* |
+| `https://…` via a reverse proxy **on another machine** | `0.0.0.0`, or that host's LAN IP | `true` |
+| `https://…` via a proxy **in Docker** on the same host | Not needed: put `web` on the proxy's network and target `web:8000` (you can remove `ports:`) | `true` |
+| `http://<host>:<port>` directly (LAN or testing only) | `0.0.0.0`, or the LAN IP | **`false`** |
+
+**`APP_BIND`** is the network address on the host that Docker listens on:
+- `127.0.0.1` accepts connections only from the host itself.
+- `0.0.0.0` accepts them on every interface.
+- A specific IP (e.g. `192.168.1.50`) accepts them only on that interface.
+
+Docker-published ports bypass `ufw` on most Linux hosts. With `0.0.0.0` on an internet-facing machine, restrict access at your router or cloud firewall.
+
+**`COOKIE_SECURE`** marks the session cookie `Secure`, so browsers only send it over HTTPS. Browsers refuse to store a Secure cookie on a plain-`http://` page, so with `true` over HTTP the login succeeds and is immediately forgotten.
+
+**Troubleshooting**
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Containers healthy and logs fine, but the page won't load from another machine | `APP_BIND=127.0.0.1` (the default) | Set `APP_BIND=0.0.0.0` (or the LAN IP). `docker compose ps` should then show `0.0.0.0:<port>->8000/tcp`. |
+| *"Your session ended. Please sign in again."* straight after every login | `COOKIE_SECURE=true` but browsing over `http://` | Use your `https://` proxy address, or set `COOKIE_SECURE=false` for plain-HTTP LAN use |
+| Same message even over `https://` | Mixing addresses (proxy hostname vs raw IP:port), or a proxy that strips cookies | Always use the proxy hostname, and check the proxy passes `Set-Cookie` and `Cookie` headers through unchanged |
+
+Plain HTTP sends passwords and session cookies unencrypted. Keep `COOKIE_SECURE=false` to trusted networks.
+
 ### Configuration
 
 All settings are environment variables. See [`.env.example`](.env.example) for the full annotated list.
@@ -100,8 +130,8 @@ All settings are environment variables. See [`.env.example`](.env.example) for t
 |---|---|---|
 | `POSTGRES_PASSWORD` | *(required)* | |
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | `admin` / — | Used **only on first start** to create the admin. Changing them later has no effect. |
-| `COOKIE_SECURE` | `true` | Keep `true` behind HTTPS. |
-| `APP_BIND` / `APP_PORT` | `127.0.0.1` / `8000` | Where the web container is published on the host. |
+| `COOKIE_SECURE` | `true` | `true` when users browse via `https://`; must be `false` for plain `http://`. See [Network access & login cookies](#network-access--login-cookies). |
+| `APP_BIND` / `APP_PORT` | `127.0.0.1` / `8000` | Host address and port for the web UI. `127.0.0.1` = this host only; `0.0.0.0` = reachable from other machines. See below. |
 | `MEDIA_PATH` | `./media` | Host folder for audio. |
 | `MAX_UPLOAD_MB` | `2048` | |
 | `WHISPER_MODELS` | `small.en,medium.en,large-v3-turbo,large-v3` | Models users can choose, fastest first. |
