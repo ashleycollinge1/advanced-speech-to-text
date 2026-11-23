@@ -36,21 +36,28 @@ Web and worker use the same image and just run different commands.
 
 ## Deploy
 
-Each release has a pinned compose file in [`deploy/compose/`](deploy/compose/), e.g. `docker-compose.v1.0.0.yml`.
+The host never builds anything. Every compose file for deployment **pulls the pre-built image** from GHCR, which GitHub Actions builds on each release. Each file is pinned to that release's image digest.
+
+| File | Use it for |
+|---|---|
+| `docker-compose.yml` (repo root) | The current release. Updated automatically by each release. |
+| `deploy/compose/docker-compose.vX.Y.Z.yml` | Pinning or rolling back to a specific version. |
+| `docker-compose.dev.yml` | Local development only. Builds from source. |
+
+On the host you only need two files: `docker-compose.yml` and `.env`.
 
 ```bash
 mkdir verbatim && cd verbatim
-curl -O https://raw.githubusercontent.com/ashleycollinge1/advanced-speech-to-text/main/deploy/compose/docker-compose.latest.yml
-curl -o .env https://raw.githubusercontent.com/ashleycollinge1/advanced-speech-to-text/main/.env.example
-# edit .env: set POSTGRES_PASSWORD and ADMIN_PASSWORD (12+ chars)
-docker compose -f docker-compose.latest.yml up -d
+# copy docker-compose.yml and .env.example from the repo (git clone, scp, or raw download)
+cp .env.example .env          # set POSTGRES_PASSWORD and ADMIN_PASSWORD (12+ chars)
+docker login ghcr.io          # only while the package is private (token needs read:packages)
+docker compose pull
+docker compose up -d
 ```
 
 Then point your reverse proxy at `127.0.0.1:8000` and sign in as `ADMIN_USERNAME`.
 
 Each model is downloaded into the `models` volume the first time someone uses it (about 1.6 GB for the default). After that it starts quickly.
-
-> If the GHCR package is private, run `docker login ghcr.io` on the host first, or make the package public in GitHub → Packages → Package settings.
 
 ### Reverse proxy
 
@@ -130,13 +137,13 @@ Each upload (and each re-transcribe) can include **Names & terms**: a short comm
 Back up two things: the Postgres database and the media folder.
 
 ```bash
-docker compose -f docker-compose.latest.yml exec -T db pg_dump -U stt stt | gzip > stt-$(date +%F).sql.gz
+docker compose exec -T db pg_dump -U stt stt | gzip > stt-$(date +%F).sql.gz
 tar czf media-$(date +%F).tgz media/
 ```
 
 ### Upgrading
 
-Download the newer `docker-compose.vX.Y.Z.yml` (or re-pull `latest`) and run `docker compose -f … up -d`. Database migrations run automatically when the web container starts.
+Replace `docker-compose.yml` with the newer one from the repo, then run `docker compose pull && docker compose up -d`. Database migrations run automatically when the web container starts. To roll back, use the matching `deploy/compose/docker-compose.vX.Y.Z.yml`.
 
 ## Releases (CI/CD)
 
@@ -144,16 +151,16 @@ Download the newer `docker-compose.vX.Y.Z.yml` (or re-pull `latest`) and run `do
 - **Pushing a tag** such as `git tag v1.2.0 && git push origin v1.2.0` triggers [`.github/workflows/release.yml`](.github/workflows/release.yml), which:
   1. runs the tests,
   2. builds the image and pushes it to `ghcr.io/ashleycollinge1/advanced-speech-to-text` with the tags `1.2.0`, `1.2` and `sha-…`,
-  3. renders [`deploy/compose.template.yml`](deploy/compose.template.yml) into `deploy/compose/docker-compose.v1.2.0.yml`, pinned to the image **digest**, updates `docker-compose.latest.yml`, and commits both to `main`.
+  3. renders [`deploy/compose.template.yml`](deploy/compose.template.yml) into `deploy/compose/docker-compose.v1.2.0.yml`, pinned to the image **digest**, updates `docker-compose.latest.yml` and the root `docker-compose.yml`, and commits them to `main`.
 
-Pre-release tags (`v1.2.0-rc.1`) get their own compose file but don't move `latest`. The commit step pushes to `main` with the built-in `GITHUB_TOKEN`. If `main` is branch-protected, allow GitHub Actions to bypass the protection.
+Pre-release tags (`v1.2.0-rc.1`) get their own compose file but don't change `latest` or the root file. The commit step pushes to `main` with the built-in `GITHUB_TOKEN`. If `main` is branch-protected, allow GitHub Actions to bypass the protection.
 
 To change what gets deployed, edit `deploy/compose.template.yml`, not the generated files.
 
 ## Development
 
 ```bash
-docker compose up --build          # http://localhost:8000  (admin / change-me-please)
+docker compose -f docker-compose.dev.yml up --build   # http://localhost:8000  (admin / change-me-please)
 ```
 
 The dev compose builds from source, sets `COOKIE_SECURE=false` for plain HTTP, and uses throwaway credentials.
