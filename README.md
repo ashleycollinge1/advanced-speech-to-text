@@ -48,7 +48,8 @@ On the host you only need two files: `docker-compose.yml` and `.env`.
 
 ```bash
 mkdir verbatim && cd verbatim
-# copy docker-compose.yml and .env.example from the repo (git clone, scp, or raw download)
+# download docker-compose.yml and .env.example from the latest GitHub Release:
+#   https://github.com/ashleycollinge1/advanced-speech-to-text/releases/latest
 cp .env.example .env          # set POSTGRES_PASSWORD and ADMIN_PASSWORD (12+ chars)
 docker login ghcr.io          # only while the package is private (token needs read:packages)
 docker compose pull
@@ -181,7 +182,7 @@ tar czf media-$(date +%F).tgz media/
 
 ### Upgrading
 
-Replace `docker-compose.yml` with the newer one from the repo, then run `docker compose pull && docker compose up -d`. Database migrations run automatically when the web container starts. To roll back, use the matching `deploy/compose/docker-compose.vX.Y.Z.yml`.
+Replace `docker-compose.yml` with the newer one from the [latest Release](https://github.com/ashleycollinge1/advanced-speech-to-text/releases/latest). The file is pinned to an exact image, so `docker compose pull` alone won't upgrade an old copy. Then run `docker compose pull && docker compose up -d`. Database migrations run automatically when the web container starts. To roll back, use the matching `deploy/compose/docker-compose.vX.Y.Z.yml`.
 
 ## Releases (CI/CD)
 
@@ -190,6 +191,7 @@ Replace `docker-compose.yml` with the newer one from the repo, then run `docker 
   1. runs the tests,
   2. builds the image and pushes it to `ghcr.io/ashleycollinge1/advanced-speech-to-text` with the tags `1.2.0`, `1.2` and `sha-…`,
   3. renders [`deploy/compose.template.yml`](deploy/compose.template.yml) into `deploy/compose/docker-compose.v1.2.0.yml`, pinned to the image **digest**, updates `docker-compose.latest.yml` and the root `docker-compose.yml`, and commits them to `main`.
+  4. publishes a GitHub **Release** for the tag, with notes (changes since the previous tag, the image digest and upgrade steps) and that version's `docker-compose.yml` and `.env.example` attached.
 
 Pre-release tags (`v1.2.0-rc.1`) get their own compose file but don't change `latest` or the root file. The commit step pushes to `main` with the built-in `GITHUB_TOKEN`. If `main` is branch-protected, allow GitHub Actions to bypass the protection.
 
