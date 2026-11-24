@@ -29,6 +29,13 @@ STATUS_PROCESSING = "processing"
 STATUS_DONE = "done"
 STATUS_ERROR = "error"
 
+# Model download states (whisper_models.status)
+MODEL_MISSING = "missing"
+MODEL_QUEUED = "queued"
+MODEL_DOWNLOADING = "downloading"
+MODEL_READY = "ready"
+MODEL_ERROR = "error"
+
 
 class User(Base):
     __tablename__ = "users"
@@ -127,3 +134,24 @@ class Highlight(Base):
     text: Mapped[str] = mapped_column(Text, nullable=False)
     note: Mapped[str] = mapped_column(Text, nullable=False, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class WhisperModelState(Base):
+    """Download state of each transcription model on the worker's models volume.
+
+    Only the worker can see the volume, so it owns this table: it scans the disk
+    on startup and performs downloads that users request from the UI.
+    """
+
+    __tablename__ = "whisper_models"
+
+    name: Mapped[str] = mapped_column(String(64), primary_key=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default=MODEL_MISSING)
+    bytes_done: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    bytes_total: Mapped[int | None] = mapped_column(BigInteger)
+    error: Mapped[str | None] = mapped_column(Text)
+    requested_by: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )

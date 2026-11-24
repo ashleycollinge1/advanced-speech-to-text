@@ -22,6 +22,10 @@ export function render(main, ctx) {
   let pollTimer = null;
   let disposed = false;
   const activeUploads = new Set();
+  // null = still loading the model list; false = no model downloaded yet.
+  let modelsReady = null;
+  let picker = null;
+  let dropTitle = null;
 
   // ------------------------------------------------------------------ header
   const statsEl = h("div.stats");
@@ -34,7 +38,7 @@ export function render(main, ctx) {
   const drop = h("label.drop", { for: "file-input" },
     fileInput,
     h("div", h("p.eyebrow", "Upload"), h("div", { style: { height: "0.75rem" } }),
-      h("h2", "Drop audio here", h("span.thin.accent", ".")),
+      h("h2", { ref: (el) => { dropTitle = el; } }, "Drop audio here", h("span.thin.accent", ".")),
       h("p.muted", { style: { "margin-top": "0.75rem", "max-width": "44ch" } },
         "MP3, M4A, WAV, FLAC, OGG, WebM, or video files. Long meetings and interviews are fine.")),
     h("div.drop-actions",
@@ -43,6 +47,8 @@ export function render(main, ctx) {
   ["dragenter", "dragover"].forEach((ev) => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add("is-over"); }));
   ["dragleave", "drop"].forEach((ev) => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.remove("is-over"); }));
   drop.addEventListener("drop", (e) => startUploads([...e.dataTransfer.files]));
+  // While no model is downloaded the label mustn't open the file chooser.
+  drop.addEventListener("click", (e) => { if (modelsReady === false) { e.preventDefault(); startUploads([]); } });
   fileInput.addEventListener("change", () => { startUploads([...fileInput.files]); fileInput.value = ""; });
 
   // ------------------------------------------------------------------ record tile
@@ -53,14 +59,16 @@ export function render(main, ctx) {
   function renderRecIdle(errorMsg) {
     clear(recPanel);
     const supported = recordingSupported() && window.isSecureContext;
+    const blocked = modelsReady === false;
     append(recPanel,
       h("div", h("p.eyebrow", "Record"), h("div", { style: { height: "0.75rem" } }), h("h2#rec-h", "Capture it live")),
       h("p.muted", supported
         ? "Record from your microphone. It'll be transcribed as soon as you save."
         : "Browser recording needs HTTPS (or localhost) and a modern browser."),
       errorMsg && formError(errorMsg),
+      blocked && h("p.hint", "Download a transcription model below to enable recording."),
       h("div.rec-actions",
-        h("button.btn.rec-btn", { type: "button", disabled: !supported, onclick: startRecording },
+        h("button.btn.rec-btn", { type: "button", disabled: !supported || blocked, onclick: startRecording },
           h("span.rec-dot", { "aria-hidden": "true" }), "Start recording")));
   }
 
@@ -125,23 +133,33 @@ export function render(main, ctx) {
   }
 
   // ------------------------------------------------------------------ model picker (applies to uploads + recordings)
-  let chosenModel = null; // null → server default
+  let chosenModel = null; // a downloaded model, or null if none yet
   const pickerSlot = h("div", h("span.skeleton.skeleton-line.w-20"), h("span.skeleton.skeleton-line.w-70"));
   // Hints apply to every upload/recording made from this page until cleared.
   const vocab = vocabField({ id: "upload-vocab" });
   const pickerHost = h("section.panel.panel-pad.picker-panel", { "aria-label": "Transcription settings" }, pickerSlot, vocab.el);
-  getModels().then((catalog) => {
+  function setModelsReady(ready) {
+    const changed = modelsReady !== ready;
+    modelsReady = ready;
+    drop.classList.toggle("is-disabled", !ready);
+    fileInput.disabled = !ready;
+    dropTitle.replaceChildren(ready ? "Drop audio here" : "Download a model first", h("span.thin.accent", "."));
+    if (changed && !recorder && !recPanel.querySelector("audio")) renderRecIdle();
+  }
+
+  getModels({ fresh: true }).then((catalog) => {
     if (disposed) return;
-    chosenModel = preferredModel(catalog);
-    const picker = modelPicker(catalog, {
+    picker = modelPicker(catalog, {
       name: "upload-model",
-      selected: chosenModel,
+      selected: preferredModel(catalog),
       legend: "Transcription quality for new recordings",
-      onChange: (id) => { chosenModel = id; rememberModel(id); },
+      onChange: (id) => { chosenModel = id; if (id) rememberModel(id); },
+      onReadyChange: setModelsReady,
     });
+    chosenModel = picker.value;
     pickerSlot.replaceChildren(picker.el);
   }).catch(() => {
-    pickerSlot.replaceChildren(h("p.hint", "Couldn't load the model list. New recordings use the server default."));
+    pickerSlot.replaceChildren(h("p.hint", "Couldn't load the model list. Reload the page to try again."));
   });
 
   const bento = h("div.bento", drop, recPanel, pickerHost);
@@ -150,6 +168,11 @@ export function render(main, ctx) {
   const uploadsEl = h("ul.uploads", { "aria-label": "Uploads in progress" });
 
   function startUploads(files, opts = {}) {
+    if (!chosenModel) {
+      toast("Download a transcription model first. See “Transcription quality” below.", "error");
+      pickerHost.scrollIntoView({ behavior: "smooth", block: "center" });
+      return;
+    }
     if (!vocab.valid) {
       toast(`Names & terms is over ${VOCAB_MAX_CHARS} characters. Shorten it before uploading.`, "error");
       document.getElementById("upload-vocab")?.focus();
@@ -295,6 +318,7 @@ export function render(main, ctx) {
     clearTimeout(pollTimer);
     window.removeEventListener("beforeunload", beforeUnload);
     recorder?.cancel();
+    picker?.destroy();
     // Uploads continue in the background; their results are toasted when done.
   };
 }

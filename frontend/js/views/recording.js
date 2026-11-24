@@ -109,7 +109,7 @@ function modelChip(id) {
 async function retranscribeDialog(rec, ctx, edited) {
   let catalog;
   try {
-    catalog = await getModels();
+    catalog = await getModels({ fresh: true });
   } catch (err) {
     toast(err.message, "error");
     return;
@@ -117,8 +117,10 @@ async function retranscribeDialog(rec, ctx, edited) {
   // Suggest the next more accurate model than the one used last time.
   const ids = catalog.models.map((m) => m.id);
   const cur = ids.indexOf(rec.model);
-  const suggested = ids[Math.min(cur + 1, ids.length - 1)] || catalog.default;
-  const picker = modelPicker(catalog, { name: "rerun-model", selected: cur < 0 ? catalog.default : suggested, legend: "Model" });
+  // Prefer the next more accurate *downloaded* model; the picker falls back if it isn't.
+  const ready = catalog.models.filter((m) => m.ready).map((m) => m.id);
+  const better = ids.slice(cur + 1).find((id) => ready.includes(id));
+  const picker = modelPicker(catalog, { name: "rerun-model", selected: better || rec.model, legend: "Model" });
   const vocab = vocabField({ id: "rerun-vocab", value: rec.vocabulary || "" });
   const body = h("div.form",
     h("p.muted", "The audio is transcribed again from scratch. Highlights are kept, because they're tied to time rather than words."),
@@ -133,10 +135,12 @@ async function retranscribeDialog(rec, ctx, edited) {
       body,
       actions: [{ label: "Cancel", value: false }, { label: "Re-transcribe", value: true, primary: true }],
     });
-    if (!ok) return;
+    if (!ok) { picker.destroy(); return; }
+    if (!picker.value) { toast("Download a model first, then re-transcribe.", "error"); continue; }
     if (vocab.valid) break;
     toast(`Names & terms is over ${VOCAB_MAX_CHARS} characters. Shorten it and try again.`, "error");
   }
+  picker.destroy();
   try {
     // Always send vocabulary: an emptied box clears the hints.
     await api(`/api/recordings/${rec.id}/retranscribe`, { method: "POST", body: { model: picker.value, vocabulary: vocab.value } });
@@ -176,7 +180,7 @@ function renderPending(page, rec, ctx, reload) {
       h("div.progress", { class: queued ? "is-indeterminate" : "", role: "progressbar", "aria-valuenow": pct, "aria-valuemin": 0, "aria-valuemax": 100, "aria-label": "Transcription progress" },
         h("span", { style: { "--p": `${pct}%` } })),
       h("p", queued
-        ? "Waiting for the worker. Jobs run one at a time, in upload order. The first use of a model also downloads it, which can take a few minutes."
+        ? "Waiting for the worker. Jobs run one at a time, in upload order. Transcription runs offline with the model already on the server."
         : "Long recordings take a while on CPU, and the more accurate models take longer. Feel free to leave. It keeps going in the background."));
     timer = setTimeout(reload, 3000);
   }

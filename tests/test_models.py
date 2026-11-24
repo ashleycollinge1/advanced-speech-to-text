@@ -63,10 +63,12 @@ def test_worker_keeps_one_model_loaded(monkeypatch):
 
     class FakeModel:
         def __init__(self, name, **kw):
+            assert kw["local_files_only"] is True  # never downloads while transcribing
             loaded.append(name)
             self.name = name
 
     monkeypatch.setitem(sys.modules, "faster_whisper", types.SimpleNamespace(WhisperModel=FakeModel))
+    monkeypatch.setattr(worker.model_store, "_local_path", lambda name: f"/models/{name}")
     monkeypatch.setattr(worker, "_model", None)
     monkeypatch.setattr(worker, "_model_name", None)
     a = worker.get_model("small.en")

@@ -10,13 +10,14 @@ from __future__ import annotations
 import gc
 import logging
 import signal
+import threading
 import time
 import uuid
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import delete, or_, select, update
 
-from . import media, stt_models
+from . import media, model_store, stt_models
 from .config import settings
 from .db import session_scope
 from .models import STATUS_DONE, STATUS_ERROR, STATUS_PROCESSING, STATUS_QUEUED, Recording, Segment
@@ -47,13 +48,17 @@ def get_model(name: str):
         return _model
     from faster_whisper import WhisperModel  # heavy import: only in the worker
 
+    if model_store._local_path(name) is None:
+        model_store.mark_missing(name, "Model files not found on the worker.")
+        raise model_store.ModelNotDownloaded(name)
+
     if _model is not None:
         log.info("Unloading model %s", _model_name)
         _model = None
         _model_name = None
         gc.collect()
     settings.models_dir.mkdir(parents=True, exist_ok=True)
-    log.info("Loading model %s (%s); the first use downloads it...", name, settings.whisper_compute_type)
+    log.info("Loading model %s (%s) from disk", name, settings.whisper_compute_type)
     started = time.monotonic()
     _model = WhisperModel(
         name,
@@ -61,6 +66,7 @@ def get_model(name: str):
         compute_type=settings.whisper_compute_type,
         cpu_threads=settings.whisper_threads,
         download_root=str(settings.models_dir),
+        local_files_only=True,  # never go online: downloads only happen when a user asks
     )
     _model_name = name
     log.info("Model %s ready in %.0fs.", name, time.monotonic() - started)
@@ -234,13 +240,58 @@ def _fail(rec_id: uuid.UUID, message: str, requeue: bool = False) -> None:
         )
 
 
+def disable_library_telemetry() -> None:
+    """Transcription is meant to be fully offline and private: opt out of
+    onnxruntime's usage telemetry (used by faster-whisper's VAD)."""
+    try:
+        import onnxruntime
+
+        onnxruntime.disable_telemetry_events()
+    except Exception as exc:  # optional dependency in dev/test environments
+        log.debug("Could not disable onnxruntime telemetry: %s", exc)
+
+
+def run_job(rec_id: uuid.UUID) -> None:
+    """Process one claimed recording, turning failures into user-facing errors."""
+    try:
+        process(rec_id)
+    except Cancelled:
+        log.info("[%s] recording deleted mid-job; skipping.", rec_id)
+        media.remove_recording_media(rec_id)
+    except InterruptedError:
+        log.info("[%s] interrupted by shutdown; re-queued.", rec_id)
+        _fail(rec_id, "", requeue=True)
+    except model_store.ModelNotDownloaded as exc:
+        log.warning("[%s] model %s is not downloaded", rec_id, exc)
+        label = stt_models.model_info(str(exc))["label"]
+        _fail(rec_id, f"The “{label}” model ({exc}) isn't downloaded. Download it from the model list, then retry.")
+    except media.MediaError as exc:
+        log.warning("[%s] media error: %s", rec_id, exc)
+        _fail(rec_id, f"Couldn't read this audio file. {exc}")
+    except Exception as exc:
+        log.exception("[%s] transcription failed", rec_id)
+        _fail(rec_id, f"Transcription failed: {exc}")
+
+
 def run() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     signal.signal(signal.SIGTERM, _handle_signal)
     signal.signal(signal.SIGINT, _handle_signal)
     settings.media_dir.mkdir(parents=True, exist_ok=True)
-    if not settings.models_dir.exists() or not any(settings.models_dir.iterdir()):
-        log.info("First start: the model will be downloaded on the first job.")
+    # Hugging Face libraries log every HTTP request at INFO; keep the worker log readable.
+    for noisy in ("httpx", "httpx2", "httpcore", "huggingface_hub", "filelock"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+    logging.getLogger("huggingface_hub.utils._http").setLevel(logging.ERROR)  # "no HF_TOKEN" nag
+    disable_library_telemetry()
+    for _ in range(30):  # the DB may still be migrating on first start
+        try:
+            model_store.scan_models()
+            break
+        except Exception as exc:
+            log.info("Waiting for database before scanning models: %s", exc)
+            time.sleep(2)
+    stop_downloads = threading.Event()
+    threading.Thread(target=model_store.download_loop, args=(stop_downloads,), name="downloads", daemon=True).start()
     log.info("Worker started (models=%s, default=%s).", ",".join(settings.whisper_models), settings.whisper_model)
 
     while not _stop:
@@ -253,20 +304,8 @@ def run() -> None:
         if rec_id is None:
             time.sleep(settings.worker_poll_seconds)
             continue
-        try:
-            process(rec_id)
-        except Cancelled:
-            log.info("[%s] recording deleted mid-job; skipping.", rec_id)
-            media.remove_recording_media(rec_id)
-        except InterruptedError:
-            log.info("[%s] interrupted by shutdown; re-queued.", rec_id)
-            _fail(rec_id, "", requeue=True)
-        except media.MediaError as exc:
-            log.warning("[%s] media error: %s", rec_id, exc)
-            _fail(rec_id, f"Couldn't read this audio file. {exc}")
-        except Exception as exc:
-            log.exception("[%s] transcription failed", rec_id)
-            _fail(rec_id, f"Transcription failed: {exc}")
+        run_job(rec_id)
+    stop_downloads.set()
     log.info("Worker stopped.")
 
 

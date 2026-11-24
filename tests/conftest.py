@@ -40,6 +40,19 @@ def migrated():
     yield
 
 
+def mark_models_ready(names=None):
+    """Simulate a worker that already has these models on disk (default: all configured)."""
+    from app.config import settings
+    from app.db import session_scope
+    from app.models import MODEL_READY, WhisperModelState
+
+    with session_scope() as db:
+        for name in names or settings.whisper_models:
+            row = db.get(WhisperModelState, name) or WhisperModelState(name=name)
+            row.status, row.bytes_done, row.bytes_total, row.error = MODEL_READY, 1000, 1000, None
+            db.add(row)
+
+
 @pytest.fixture()
 def client(migrated):
     from fastapi.testclient import TestClient
@@ -50,7 +63,10 @@ def client(migrated):
     from app.security import login_limiter
 
     with engine.begin() as c:
-        c.execute(text("TRUNCATE users, sessions, recordings, segments, highlights RESTART IDENTITY CASCADE"))
+        c.execute(
+            text("TRUNCATE users, sessions, recordings, segments, highlights, whisper_models RESTART IDENTITY CASCADE")
+        )
+    mark_models_ready()
     login_limiter.reset()
     with TestClient(app) as tc:
         yield tc

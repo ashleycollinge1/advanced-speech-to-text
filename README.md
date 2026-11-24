@@ -57,7 +57,7 @@ docker compose up -d
 
 Then point your reverse proxy at `127.0.0.1:8000` and sign in as `ADMIN_USERNAME`.
 
-Each model is downloaded into the `models` volume the first time someone uses it (about 1.6 GB for the default). After that it starts quickly.
+**No model is downloaded automatically.** On first sign-in, the library asks you to download a transcription model. Click **Download** on a model, confirm, and watch the progress bar. Uploads and recording unlock as soon as it finishes. Each model is downloaded once into the `models` volume (about 1.6 GB for the default). After that, transcription runs **fully offline**.
 
 ### Reverse proxy
 
@@ -152,7 +152,15 @@ Users pick a model per upload, and can re-transcribe any finished recording with
 
 \* Measured on a 16-core CPU with int8 on a short clip. For example, 0.7× means a 1-hour recording takes about 42 minutes. Speed scales with core count, so expect it to be slower on smaller machines.
 
-The worker keeps **one model in memory at a time**. Switching models costs about 10–35 seconds to load (plus a one-off download on first use). large-v3 needs about 3–4 GB of RAM while it runs. Jobs run one after another, so a long large-v3 job delays the ones behind it. If you have RAM to spare, `docker compose up -d --scale worker=2` runs two jobs in parallel.
+The worker keeps **one model in memory at a time**. Switching models takes a few seconds to load from disk. Models must be downloaded first: see [Model downloads & offline operation](#model-downloads--offline-operation). large-v3 needs about 3–4 GB of RAM while it runs. Jobs run one after another, so a long large-v3 job delays the ones behind it. If you have RAM to spare, `docker compose up -d --scale worker=2` runs two jobs in parallel.
+
+### Model downloads & offline operation
+
+- **Only on request:** models are downloaded only when a signed-in user clicks **Download** in the model picker (in the library or the re-transcribe dialog) and confirms. Progress is shown live, and the worker downloads in the background, so transcription jobs keep running.
+- **Offline transcription:** jobs can only use downloaded models. The worker loads them with `local_files_only=True`, so a running server never needs the internet. This was tested with all outbound traffic blocked.
+- **No telemetry:** the image sets `HF_HUB_DISABLE_TELEMETRY=1` and `ORT_DISABLE_TELEMETRY=1`. Without the second, onnxruntime (used for silence detection) uploads usage telemetry to Microsoft. With both set, the worker's only network connection while transcribing is to Postgres.
+- **Startup scan:** on start, the worker checks which models are already on disk. Upgrading an install where models were downloaded by an older version marks them ready, with no re-download. If files go missing, the model shows as not downloaded again.
+- **Disk space:** a download is refused if the volume doesn't have enough free space.
 
 ### Vocabulary hints
 

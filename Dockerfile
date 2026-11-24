@@ -25,7 +25,15 @@ ARG APP_VERSION=dev
 ENV APP_VERSION=${APP_VERSION} \
     MEDIA_DIR=/data/media \
     MODELS_DIR=/data/models \
-    HF_HOME=/data/models/hf
+    HF_HOME=/data/models/hf \
+    # Models are only downloaded when a user clicks "Download" in the UI.
+    # Plain HTTP downloads (not Xet) write one growing file, so progress can be shown.
+    HF_HUB_DISABLE_XET=1 \
+    HF_HUB_DISABLE_TELEMETRY=1 \
+    HF_HUB_DISABLE_PROGRESS_BARS=1 \
+    # onnxruntime (faster-whisper's VAD) otherwise uploads usage telemetry to
+    # mobile.events.data.microsoft.com on every run. Measured: this stops it.
+    ORT_DISABLE_TELEMETRY=1
 
 RUN chmod 0755 /usr/local/bin/entrypoint.sh \
  && mkdir -p /data/media /data/models \

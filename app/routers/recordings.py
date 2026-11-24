@@ -14,7 +14,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 from starlette.background import BackgroundTask
 
-from .. import media, stt_models
+from .. import media, model_store, stt_models
 from ..config import settings
 from ..db import SessionLocal, get_db
 from ..models import STATUS_DONE, STATUS_ERROR, STATUS_QUEUED, Highlight, Recording, Segment, User
@@ -89,12 +89,38 @@ def _check_model(model: str | None) -> str:
     return model
 
 
+def _require_downloaded(db: Session, model: str) -> None:
+    """Transcription is offline-only, so a job may only use a model already on disk."""
+    if not model_store.is_ready(db, model):
+        label = stt_models.model_info(model)["label"]
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"The “{label}” model ({model}) isn't downloaded yet. Download it from the model list first.",
+        )
+
+
+def _require_downloaded_new_session(model: str) -> None:
+    with SessionLocal() as db:
+        _require_downloaded(db, model)
+
+
 # --------------------------------------------------------------------------- models
 
 
 @router.get("/models")
-def list_models(_: User = Depends(current_user)) -> dict:
-    return {"models": stt_models.available(), "default": settings.whisper_model}
+def list_models(_: User = Depends(current_user), db: Session = Depends(get_db)) -> dict:
+    st = model_store.states(db)
+    models = [{**m, **model_store.state_out(m["id"], st.get(m["id"]))} for m in stt_models.available()]
+    return {"models": models, "default": settings.whisper_model, "any_ready": any(m["ready"] for m in models)}
+
+
+@router.post("/models/{name}/download", status_code=202)
+def download_model(name: str, user: User = Depends(current_user), db: Session = Depends(get_db)) -> dict:
+    """Ask the worker to download a model. Idempotent."""
+    if name not in settings.whisper_models:
+        raise HTTPException(404, "Unknown model.")
+    row = model_store.request_download(db, name, user.id)
+    return {"model": {**stt_models.model_info(name), **model_store.state_out(name, row)}}
 
 
 # --------------------------------------------------------------------------- recordings
@@ -126,6 +152,7 @@ async def upload_recording(
     """Raw-body upload (the request body is the file itself). It streams straight
     to disk, so large files never sit in memory or a temp spool."""
     model = _check_model(model)
+    await run_in_threadpool(_require_downloaded_new_session, model)
     vocabulary = _check_vocabulary(vocabulary)  # validate before accepting a large body
     ext = media.safe_ext(filename)
     if ext is None:
@@ -245,6 +272,7 @@ def retranscribe(
     if rec.status not in (STATUS_DONE, STATUS_ERROR):
         raise HTTPException(status.HTTP_409_CONFLICT, "This recording is already being transcribed.")
     rec.model = _check_model(body.model)
+    _require_downloaded(db, rec.model)
     if "vocabulary" in body.model_fields_set:
         rec.vocabulary = _check_vocabulary(body.vocabulary)
     rec.status = STATUS_QUEUED
